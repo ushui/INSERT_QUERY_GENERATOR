@@ -1,7 +1,7 @@
 Attribute VB_Name = "InsertQueryGeneratorModule"
 '''''''''''''''''''''''''''''''''''
 ''' INSERT QUERY GENERATOR MODULE
-''' Version 1.1
+''' Version 1.2
 '''
 ''' (C) 2018 ushui
 ''' Released under the MIT license:
@@ -11,6 +11,12 @@ Attribute VB_Name = "InsertQueryGeneratorModule"
 '''''''''''''''''''''''''''''''''''
 ''' 変更履歴
 '''
+''' 2018/08/07 Version 1.2
+''' SYSDATEとSYSTIMESTAMPを含むいくつかの日時関数に対応
+''' TIMESTAMP WITH TIME ZONEデータ型、TIMESTAMP WITH LOCAL TIME ZONEデータ型、期間データ型に対応
+''' 一部データ型のフォーマットグループの誤りを修正
+''' アンパサンドがINSERTできない問題を修正
+''' パフォーマンス向上
 ''' 2018/07/22 Version 1.1
 ''' エラーメッセージの修正
 ''' 2018/07/15 Version 1.0
@@ -108,26 +114,45 @@ Private Function getDictOfFormatGroupByDataTypeOrcl() As Object
     'キーの大文字・小文字は区別しない
     .CompareMode = vbTextCompare
 
-    '文字列型
+    '文字データ型
     .Add "CHAR", "CHAR"
-    .Add "LONG", "CHAR"
     .Add "NCHAR", "CHAR"
     .Add "NVARCHAR2", "CHAR"
     .Add "VARCHAR2", "CHAR"
-    '数値型
+    .Add "CLOB", "CHAR"
+    .Add "NCLOB", "CHAR"
+    .Add "LONG", "CHAR"
+    '数値データ型
     .Add "NUMBER", "NUMBER"
     .Add "BINARY_FLOAT", "NUMBER"
     .Add "BINARY_DOUBLE", "NUMBER"
-    '日付型
+    'DATEデータ型
     .Add "DATE", "DATE"
-    '時刻型
+    'TIMESTAMPデータ型
     .Add "TIMESTAMP", "TIMESTAMP"
-    'バイナリ型・ラージオブジェクト型
+    'TIMESTAMP WITH TIME ZONEデータ型
+    .Add "TIMESTAMP WITH TIME ZONE", "TIMESTAMP WITH TIME ZONE"
+    'TIMESTAMP WITH LOCAL TIME ZONEデータ型
+    .Add "TIMESTAMP WITH LOCAL TIME ZONE", "TIMESTAMP WITH LOCAL TIME ZONE"
+    '期間データ型（年～月）
+    .Add "INTERVAL YEAR TO MONTH", "INTERVAL YEAR TO MONTH"
+    .Add "INTERVAL YEAR", "INTERVAL YEAR TO MONTH"
+    .Add "INTERVAL MONTH", "INTERVAL YEAR TO MONTH"
+    '期間データ型（日～秒）
+    .Add "INTERVAL DAY TO HOUR", "INTERVAL DAY TO SECOND"
+    .Add "INTERVAL DAY TO MINUTE", "INTERVAL DAY TO SECOND"
+    .Add "INTERVAL DAY TO SECOND", "INTERVAL DAY TO SECOND"
+    .Add "INTERVAL HOUR TO MINUTE", "INTERVAL DAY TO SECOND"
+    .Add "INTERVAL HOUR TO SECOND", "INTERVAL DAY TO SECOND"
+    .Add "INTERVAL MINUTE TO SECOND", "INTERVAL DAY TO SECOND"
+    .Add "INTERVAL DAY", "INTERVAL DAY TO SECOND"
+    .Add "INTERVAL HOUR", "INTERVAL DAY TO SECOND"
+    .Add "INTERVAL MINUTE", "INTERVAL DAY TO SECOND"
+    .Add "INTERVAL SECOND", "INTERVAL DAY TO SECOND"
+    'RAW型・BLOB型・LONG RAW型
     .Add "RAW", "RAW"
-    .Add "LONG RAW", "RAW"
     .Add "BLOB", "RAW"
-    .Add "CLOB", "RAW"
-    .Add "NCLOB", "RAW"
+    .Add "LONG RAW", "RAW"
   End With
 
   Set getDictOfFormatGroupByDataTypeOrcl = formatGroupByDataType
@@ -166,20 +191,20 @@ End Function
 ''' <returns>
 ''' <para>引数として与えた<paramref name="lineFeed"/>によって、下記の値を返します。いずれにも当てはまらなかった場合は<c>vbNullString</c>を返します。</para>
 ''' <list type="bullet">
-''' <item><description><c>CRLF</c>の場合: <c>' || CHR(13) || CHR(10) || '」</c></description></item>
-''' <item><description><c>CR</c>の場合: <c>' || CHR(13) || '</c></description></item>
-''' <item><description><c>LF</c>の場合: <c>' || CHR(10) || '</c></description></item>
+''' <item><description><c>CRLF</c>の場合: <c>'||CHR(13)||CHR(10)||'」</c></description></item>
+''' <item><description><c>CR</c>の場合: <c>'||CHR(13)||'</c></description></item>
+''' <item><description><c>LF</c>の場合: <c>'||CHR(10)||'</c></description></item>
 ''' </list>
 ''' </returns>
 Private Function getInsertableLineFeedCodeOrcl(ByRef lineFeed As String) As String
 
   Select Case lineFeed
     Case "CRLF"
-      getInsertableLineFeedCodeOrcl = "' || CHR(13) || CHR(10) || '"
+      getInsertableLineFeedCodeOrcl = "'||CHR(13)||CHR(10)||'"
     Case "LF"
-      getInsertableLineFeedCodeOrcl = "' || CHR(10) || '"
+      getInsertableLineFeedCodeOrcl = "'||CHR(10)||'"
     Case "CR"
-      getInsertableLineFeedCodeOrcl = "' || CHR(13) || '"
+      getInsertableLineFeedCodeOrcl = "'||CHR(13)||'"
     Case Else
       getInsertableLineFeedCodeOrcl = vbNullString
   End Select
@@ -198,44 +223,6 @@ End Function
 ''' <remarks>
 ''' <para>ユーザー定義関数です。</para>
 ''' <para>指定した引数からINSERT文を生成します（Oracle Database用）。</para>
-''' <para></para>
-''' <para>●引数について</para>
-''' <para>生成を行う前に引数の検査を行い、誤っていればエラーメッセージを生成します。</para>
-''' <para>また、<paramref name="toReplaceNull"/>を省略した場合、空文字をNULLとして扱います。</para>
-''' <para></para>
-''' <para>●変換に対応しているデータ型について</para>
-''' <para>期間データ型とBFILE型を除くOracle組込みデータ型に対応しております。</para>
-''' <para>XMLTYPE型等には対応しておりませんが、セルへ<c>xmltype('<?xml version="1.0"?><Test></Test>')</c>のように直接入力することでINSERTは可能です。</para>
-''' <para></para>
-''' <para>●変換仕様</para>
-''' <para>VALUES句の引数を生成する際は、事前に<paramref name="values"/>の変換を行い、<paramref name="types"/>ごとの書式に合わせた文字列を生成します。</para>
-''' <para>○文字列型</para>
-''' <para>INSERT可能な文字列へ置換し、<c>'</c>で括ります。</para>
-''' <para>○数値型</para>
-''' <para>変換しません。</para>
-''' <para>○日付型</para>
-''' <para>TO_DATE関数を生成します。</para>
-''' <para>データ型には<c>:</c>を付けることによって書式を設定することができます。これは省略可能です。</para>
-''' <para>・第一引数：データ</para>
-''' <para>・第二引数：<c>:</c>がない場合は省略する。<c>:</c>より先に指定した文字列を<c>'</c>で括った文字列</para>
-''' <para>○時刻型</para>
-''' <para>TO_TIMESTAMP関数を生成します。</para>
-''' <para>データ型には<c>:</c>を付けることによって書式を設定することができます。これは省略可能です。</para>
-''' <para>・第一引数：データ</para>
-''' <para>・第二引数：<c>:</c>がない場合は省略する。<c>:</c>より先に指定した文字列を<c>'</c>で括った文字列</para>
-''' <para>○バイナリ型・ラージオブジェクト型（BFILE型除く）</para>
-''' <para>HEXTORAW関数を生成します。</para>
-''' <para>・第一引数：データ</para>
-''' <para>○その他</para>
-''' <para>変換しません。</para>
-''' <para></para>
-''' <para>●注意事項</para>
-''' <para>Oracle Databaseでは長さ0の文字列をNULLとして扱います。</para>
-''' <para></para>
-''' <para>●リファレンス</para>
-''' <para>https://docs.oracle.com/cd/E57425_01/121/SQLRF/sql_elements003.htm</para>
-''' <para></para>
-''' <para>●その他/para>
 ''' <para>Static関数であるため、変数の初期化と再利用には注意を払ってください。</para>
 ''' <para>これは本関数が幾度も呼ばれることを想定しており、関数内の変数の領域をその都度で確保せずに済むようにしているためです。</para>
 ''' </remarks>
@@ -255,7 +242,7 @@ Public Static Function INSERT_ORCL(tableName As String, _
   Dim errMsg As String: errMsg = getMsgIfIncorrectArgs(tableName, types, clmns, values, lineFeed, toReplaceNull)
   'エラーメッセージがvbNullString以外である場合
   If StrPtr(errMsg) <> 0 Then
-    'MsgBoxは連続で表示されてしまう可能性が高いため使用しない
+    'MsgBoxは連続で表示されてしまう可能性があるため使用しない
     INSERT_ORCL = errMsg
     Exit Function
   End If
@@ -266,17 +253,19 @@ Public Static Function INSERT_ORCL(tableName As String, _
   '改行コード
   Dim insertableLineFeedCode As String: insertableLineFeedCode = getInsertableLineFeedCodeOrcl(lineFeed)
   '文字数
-  Dim lenDate As Long: lenDate = Len("DATE")
-  Dim lenTimeStamp As Long: lenTimeStamp = Len("TIMESTAMP")
+  Dim lenDate As Long
+  If lenDate = 0 Then
+    lenDate = Len("DATE")
+  End If
+  Dim lenTimeStamp As Long
+  If lenTimeStamp = 0 Then
+    lenTimeStamp = Len("TIMESTAMP")
+  End If
   'カラム、データ格納用（添え字は1から）
   Dim arrClmns As Variant, arrValues As Variant
   ReDim arrClmns(1 To clmns.Count), arrValues(1 To values.Count)
   'ループ用
   Dim i As Long
-  'その他
-  Dim tmpReplace As String
-  Dim tmpIdxAtHyphen As Long
-  Dim tmpArrIntervalsStr() As String
 
   ' --------------------
   ' 処理部
@@ -292,43 +281,95 @@ Public Static Function INSERT_ORCL(tableName As String, _
     If values.Item(i).Value = toReplaceNull Then
       arrValues(i) = "NULL"
     Else
-      '文字列型
+      '文字データ型
       If getFormatGroupNameOrcl(types.Item(i).Value) = "CHAR" Then
-        'エスケープ等
-        tmpReplace = values.Item(i).Value
-        tmpReplace = Replace(tmpReplace, "'", "''")
-        tmpReplace = Replace(tmpReplace, vbTab, "' || CHR(9) || '")
-        tmpReplace = Replace(tmpReplace, vbLf, insertableLineFeedCode)
-        'シングルクォートで括る
-        arrValues(i) = Join(Array("'", tmpReplace, "'"), "")
+        'エスケープした上でシングルクォートで括る
+        arrValues(i) = Join(Array("'" _
+                                  , Replace( _
+                                   Replace( _
+                                   Replace( _
+                                   Replace(values.Item(i).Value _
+                                    , "'",   "''" _
+                                   ), "&", "&'||'" _
+                                   ), vbTab, "'||CHR(9)||'" _
+                                   ), vbLf,  insertableLineFeedCode _
+                                   ) _
+                            , "'") _
+                       , "")
 
-      '数値型
+      '数値データ型
       ElseIf getFormatGroupNameOrcl(types.Item(i).Value) = "NUMBER" Then
         arrValues(i) = CStr(values.Item(i).Value)
 
-      '日付型
+      'DATEデータ型
       ElseIf getFormatGroupNameOrcl(Left(types.Item(i).Value, lenDate)) = "DATE" Then
-        If Mid(types.Item(i).Value, lenDate + 1, 1) = ":" Then
-          'TO_DATE('データ')
+        If UCase(values.Item(i).Value) = "SYSDATE" Then
+          arrValues(i) = "SYSDATE"
+        ElseIf UCase(values.Item(i).Value) = "CURRENT_DATE" Then
+          arrValues(i) = "CURRENT_DATE"
+        ElseIf Mid(types.Item(i).Value, lenDate + 1, 1) = ":" Then
+          'TO_DATE('データ', '書式')
           arrValues(i) = Join(Array("TO_DATE('", values.Item(i).Value, "','", Mid(types.Item(i).Value, lenDate + 2), "')"), "")
         Else
-          'TO_DATE('データ', '書式')
+          'TO_DATE('データ')
           arrValues(i) = Join(Array("TO_DATE('", values.Item(i).Value, "')"), "")
         End If
 
-      '時刻型
+      'TIMESTAMPデータ型
       ElseIf getFormatGroupNameOrcl(Left(types.Item(i).Value, lenTimeStamp)) = "TIMESTAMP" Then
-        If Mid(types.Item(i).Value, lenTimeStamp + 1, 1) = ":" Then
-          'TO_TIMESTAMP('データ')
+        If UCase(values.Item(i).Value) = "SYSTIMESTAMP" Then
+          arrValues(i) = "SYSTIMESTAMP"
+        ElseIf UCase(values.Item(i).Value) = "CURRENT_TIMESTAMP" Then
+          arrValues(i) = "CURRENT_TIMESTAMP"
+        ElseIf UCase(values.Item(i).Value) = "LOCALTIMESTAMP" Then
+          arrValues(i) = "LOCALTIMESTAMP"
+        ElseIf Mid(types.Item(i).Value, lenTimeStamp + 1, 1) = ":" Then
+          'TO_TIMESTAMP('データ', '書式')
           arrValues(i) = Join(Array("TO_TIMESTAMP('", values.Item(i).Value, "','", Mid(types.Item(i).Value, lenTimeStamp + 2), "')"), "")
         Else
-          'TO_TIMESTAMP('データ', '書式')
-          arrValues(i) = Join(Array("TO_DATE('", values.Item(i).Value, "')"), "")
+          'TO_TIMESTAMP('データ')
+          arrValues(i) = Join(Array("TO_TIMESTAMP('", values.Item(i).Value, "')"), "")
         End If
 
-      'バイナリ型・ラージオブジェクト型
+      'TIMESTAMP WITH TIME ZONEデータ型
+      ElseIf getFormatGroupNameOrcl(Left(types.Item(i).Value, lenTimeStamp)) = "TIMESTAMP WITH TIME ZONE" Then
+        If UCase(values.Item(i).Value) = "SYSTIMESTAMP" Then
+          arrValues(i) = "SYSTIMESTAMP"
+        ElseIf UCase(values.Item(i).Value) = "CURRENT_TIMESTAMP" Then
+          arrValues(i) = "CURRENT_TIMESTAMP"
+        ElseIf UCase(values.Item(i).Value) = "LOCALTIMESTAMP" Then
+          arrValues(i) = "LOCALTIMESTAMP"
+        ElseIf Mid(types.Item(i).Value, lenTimeStamp + 1, 1) = ":" Then
+          'TO_TIMESTAMP_TZ('データ', '書式')
+          arrValues(i) = Join(Array("TO_TIMESTAMP_TZ('", values.Item(i).Value, "','", Mid(types.Item(i).Value, lenTimeStamp + 2), "')"), "")
+        Else
+          'TO_TIMESTAMP_TZ('データ')
+          arrValues(i) = Join(Array("TO_TIMESTAMP_TZ('", values.Item(i).Value, "')"), "")
+        End If
+
+      'TIMESTAMP WITH LOCAL TIME ZONEデータ型
+      ElseIf getFormatGroupNameOrcl(Left(types.Item(i).Value, lenTimeStamp)) = "TIMESTAMP WITH LOCAL TIME ZONE" Then
+        If UCase(values.Item(i).Value) = "SYSTIMESTAMP" Then
+          arrValues(i) = "SYSTIMESTAMP"
+        ElseIf Mid(types.Item(i).Value, lenTimeStamp + 1, 1) = ":" Then
+          'CAST(TO_TIMESTAMP('データ', '書式') AS TIMESTAMP WITH LOCAL TIME ZONE)
+          arrValues(i) = Join(Array("CAST(TO_TIMESTAMP('", values.Item(i).Value, "','", Mid(types.Item(i).Value, lenTimeStamp + 2), "') AS TIMESTAMP WITH LOCAL TIME ZONE)"), "")
+        Else
+          'CAST(TO_TIMESTAMP('データ') AS TIMESTAMP WITH LOCAL TIME ZONE)
+          arrValues(i) = Join(Array("CAST(TO_TIMESTAMP('", values.Item(i).Value, "') AS TIMESTAMP WITH LOCAL TIME ZONE)"), "")
+        End If
+
+      '期間データ型（年～月）
+      ElseIf getFormatGroupNameOrcl(types.Item(i).Value) = "INTERVAL YEAR TO MONTH" Then
+        arrValues(i) = Join(Array("TO_YMINTERVAL('", values.Item(i).Value, "')"), "")
+
+      '期間データ型（日～秒）
+      ElseIf getFormatGroupNameOrcl(types.Item(i).Value) = "INTERVAL DAY TO SECOND" Then
+        arrValues(i) = Join(Array("TO_DSINTERVAL('", values.Item(i).Value, "')"), "")
+
+      'RAW型・BLOB型・LONG RAW型
       ElseIf getFormatGroupNameOrcl(Left(types.Item(i).Value, lenTimeStamp)) = "RAW" Then
-        'DECODE('データ', 'HEX')
+        'HEXTORAW('データ')
         arrValues(i) = Join(Array("HEXTORAW('", values.Item(i).Value, "')"), "")
 
       '上記に当てはまらないデータ型
